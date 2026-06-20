@@ -30,8 +30,10 @@ void write_file(const char *path, const char *value) {
 
 int container_main(void *arg) {
     char ch;
+    // Close the write end of the synchronization wire
     close(sync_pipe[1]); 
 
+    // Sleep until the parent process completes host-side plumbing
     if (read(sync_pipe[0], &ch, 1) != 1) {
         perror("[Container] Failed to sync with parent");
         return 1;
@@ -39,8 +41,10 @@ int container_main(void *arg) {
     close(sync_pipe[0]);
 
     printf("[Container] Inside the container namespaces!\n");
+    mount("none", "/", NULL, MS_REC | MS_PRIVATE, NULL);
     sethostname("c-container-demo", 16);
 
+    
     if (chroot("./rootfs") != 0) {
         perror("[Container] chroot failed");
         return 1;
@@ -55,7 +59,7 @@ int container_main(void *arg) {
     }
 
     char *container_args[] = {"/bin/sh", NULL};
-    printf("[Container] Launching Alpine Sh shell...\n\n");
+    printf("[Container] Launching native Ubuntu Bash shell...\n\n");
     execvp(container_args[0], container_args);
 
     perror("[Container] execvp failed");
@@ -69,7 +73,10 @@ int main() {
     }
 
     char *stack = malloc(STACK_SIZE);
-    if (!stack) { exit(1); }
+    if (!stack) { 
+        perror("Stack allocation failed");
+        exit(1); 
+    }
 
     printf("[Host] Cloning process with Mount, PID, User, and UTS isolation...\n");
 
@@ -82,11 +89,12 @@ int main() {
 
     if (container_pid == -1) {
         perror("[Host] Clone failed");
+        free(stack);
         exit(1);
     }
 
+    // Parent closes read end of the pipe immediately
     close(sync_pipe[0]); 
-
 
     const char *cgroup_dir = "/sys/fs/cgroup/my_container";
     mkdir(cgroup_dir, 0755); 
@@ -103,43 +111,46 @@ int main() {
     snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
     write_file(path_buf, pid_str);
 
-    /* --- USER NAMESPACE MAPPING --- */
-    // UPGRADE: Grab the REAL user ID, bypassing the `sudo` trap
-    int host_uid = getuid();
-    int host_gid = getgid();
-    
-    if (getenv("SUDO_UID")) { host_uid = atoi(getenv("SUDO_UID")); }
-    if (getenv("SUDO_GID")) { host_gid = atoi(getenv("SUDO_GID")); }
+    /* --- USER NAMESPACE IDENTIFICATION SETTINGS --- */
+    // Map identity settings to run as true root within the user namespace
+    int target_uid = 0; 
+    int target_gid = 0;
 
-    printf("[Host] Mapping User Namespaces (Container UID 0 -> Host UID %d)...\n", host_uid);
+    printf("[Host] Mapping User Namespaces (Container UID 0 -> Host UID %d)...\n", target_uid);
 
     char map_path[256];
     char map_str[256];
 
+    // *****************************************************************************************
+    // Ques: try running whoami command 
+    // with and without this code block to understand what is happening
     snprintf(map_path, sizeof(map_path), "/proc/%d/uid_map", container_pid);
-    snprintf(map_str, sizeof(map_str), "0 %d 1\n", host_uid);
+    snprintf(map_str, sizeof(map_str), "0 %d 1\n", target_uid);
     write_file(map_path, map_str);
 
-    // UPGRADE: Only attempt to write setgroups if the file physically exists
+    // Disable global setgroups context manipulation privileges
     snprintf(map_path, sizeof(map_path), "/proc/%d/setgroups", container_pid);
     if (access(map_path, F_OK) == 0) {
         write_file(map_path, "deny\n");
-    } else {
-        printf("[Host] Notice: /proc/[pid]/setgroups not found, skipping.\n");
     }
 
+    // Write the explicit container gid mapping parameters
     snprintf(map_path, sizeof(map_path), "/proc/%d/gid_map", container_pid);
-    snprintf(map_str, sizeof(map_str), "0 %d 1\n", host_gid);
+    snprintf(map_str, sizeof(map_str), "0 %d 1\n", target_gid);
     write_file(map_path, map_str);
+    // *****************************************************************************************
 
 
+    // Wake up the child process now that the host plumbing is complete
     write(sync_pipe[1], "O", 1);
     close(sync_pipe[1]); 
 
     waitpid(container_pid, NULL, 0);
 
-    rmdir(cgroup_dir);
+    if (rmdir(cgroup_dir) != 0) {
+        perror("[Host] Warning: Failed to clean up cgroup directory");
+    }
     free(stack);
-    printf("[Host] Container has closed.\n");
+    printf("[Host] Container has closed smoothly.\n");
     return 0;
 }

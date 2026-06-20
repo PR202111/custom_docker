@@ -12,6 +12,7 @@
 // This function remains unchanged from Stage 2
 int container_main(void *arg) {
     printf("[Container] Inside the container namespaces!\n");
+    mount("none", "/", NULL, MS_REC | MS_PRIVATE, NULL);
     sethostname("c-container-demo", 16);
 
     if (chroot("./rootfs") != 0) {
@@ -105,7 +106,9 @@ int main() {
     waitpid(container_pid, NULL, 0);
 
     // Cleanup: Clean up the directory after the container terminates
-    rmdir(cgroup_dir);
+    if (rmdir(cgroup_dir) != 0) {
+        perror("[Host] Warning: Failed to clean up cgroup directory");
+    }
 
     free(stack);
     printf("[Host] Container has closed.\n");

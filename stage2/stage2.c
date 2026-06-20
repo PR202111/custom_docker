@@ -11,6 +11,9 @@
 int container_main(void *arg) {
     printf("[Container] Inside the container namespaces!\n");
 
+    // Make all mounts private to this namespace so they don't leak to the host
+    mount("none", "/", NULL, MS_REC | MS_PRIVATE, NULL); // Ques: what Problem we will face if we comment out this time
+
     sethostname("c-container-demo", 16);
 
     if (chroot("./rootfs") != 0) {
@@ -34,6 +37,7 @@ int container_main(void *arg) {
     execvp(container_args[0], container_args);
 
     perror("[Container] execvp failed");
+
     return 1;
 }
 

@@ -13,30 +13,47 @@ int sync_pipe[2];
 
 void write_file(const char *path, const char *value) {
     FILE *fp = fopen(path, "w");
-    if (!fp) { perror("Failed to open file"); exit(1); }
-    if (fprintf(fp, "%s", value) < 0) { perror("Failed to write"); fclose(fp); exit(1); }
+    if (!fp) {
+        fprintf(stderr, "[Host] FATAL: Failed to open file: %s\n", path);
+        perror("[Host] Reason");
+        exit(1);
+    }
+    if (fprintf(fp, "%s", value) < 0) {
+        fprintf(stderr, "[Host] FATAL: Failed to write to file: %s\n", path);
+        perror("[Host] Reason");
+        fclose(fp);
+        exit(1);
+    }
     fclose(fp);
 }
 
 int container_main(void *arg) {
     char ch;
+
     close(sync_pipe[1]); 
 
-
-    if (read(sync_pipe[0], &ch, 1) != 1) return 1;
+    if (read(sync_pipe[0], &ch, 1) != 1) {
+        perror("[Container] Failed to sync with parent");
+        return 1;
+    }
     close(sync_pipe[0]);
 
     printf("[Container] Inside the container namespaces!\n");
+    mount("none", "/", NULL, MS_REC | MS_PRIVATE, NULL);
     sethostname("c-container-demo", 16);
 
-
     if (chroot("./rootfs") != 0) {
-        perror("chroot failed"); return 1; 
+        perror("[Container] chroot failed");
+        return 1;
     }
-    chdir("/");
+    if (chdir("/") != 0) {
+        perror("[Container] chdir failed");
+        return 1;
+    }
 
-
-    mount("proc", "/proc", "proc", 0, NULL);
+    if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
+        perror("[Container] Mounting /proc failed");
+    }
 
     /* --- INSIDE NETWORK CONFIGURATION --- */
     // Bring up the loopback interface
@@ -56,30 +73,62 @@ int container_main(void *arg) {
 }
 
 int main() {
-    pipe(sync_pipe);
+    if (pipe(sync_pipe) < 0) {
+        perror("Pipe creation failed");
+        exit(1);
+    }
     char *stack = malloc(STACK_SIZE);
+    if (!stack) { 
+        perror("Stack allocation failed");
+        exit(1); 
+    }
 
     printf("[Host] Cloning process with Network, Mount, PID, and UTS isolation...\n");
 
     int container_pid = clone(
         container_main, 
         stack + STACK_SIZE, 
-        CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWNET | SIGCHLD, 
+        CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWNET | SIGCHLD, 
         NULL
     );
-    usleep(10000);
-
+    
     close(sync_pipe[0]); 
 
 
     const char *cgroup_dir = "/sys/fs/cgroup/my_container";
-    mkdir(cgroup_dir, 0755);
-    char path[256];
-    snprintf(path, sizeof(path), "%s/memory.max", cgroup_dir);  write_file(path, "50M");
-    snprintf(path, sizeof(path), "%s/pids.max", cgroup_dir);    write_file(path, "4");
-    snprintf(path, sizeof(path), "%s/cgroup.procs", cgroup_dir);
-    char pid_str[32]; snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
-    write_file(path, pid_str);
+    mkdir(cgroup_dir, 0755); 
+
+    char path_buf[256];
+    snprintf(path_buf, sizeof(path_buf), "%s/memory.max", cgroup_dir);
+    write_file(path_buf, "50M");
+
+    snprintf(path_buf, sizeof(path_buf), "%s/pids.max", cgroup_dir);
+    write_file(path_buf, "4");
+
+    snprintf(path_buf, sizeof(path_buf), "%s/cgroup.procs", cgroup_dir);
+    char pid_str[32];
+    snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
+    write_file(path_buf, pid_str);
+
+    int target_uid = 0; 
+    int target_gid = 0;
+
+    printf("[Host] Mapping User Namespaces (Container UID 0 -> Host UID %d)...\n", target_uid);
+
+    char map_path[256];
+    char map_str[256];
+    snprintf(map_path, sizeof(map_path), "/proc/%d/uid_map", container_pid);
+    snprintf(map_str, sizeof(map_str), "0 %d 1\n", target_uid);
+    write_file(map_path, map_str);
+
+    snprintf(map_path, sizeof(map_path), "/proc/%d/setgroups", container_pid);
+    if (access(map_path, F_OK) == 0) {
+        write_file(map_path, "deny\n");
+    }
+
+    snprintf(map_path, sizeof(map_path), "/proc/%d/gid_map", container_pid);
+    snprintf(map_str, sizeof(map_str), "0 %d 1\n", target_gid);
+    write_file(map_path, map_str);
 
     /* --- STAGE 5: HOST SIDE NETWORK PLUMBING --- */
     printf("[Host] Plumbing virtual ethernet wires into container...\n");
@@ -99,8 +148,11 @@ int main() {
     // 4. Enable NAT/IP Forwarding on the host so the container can reach outer web hardware
     system("sysctl -w net.ipv4.ip_forward=1 > /dev/null");
     system("iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -j MASQUERADE");
-    /* ------------------------------------------- */
-
+    
+    // 5. Ensure the etc directory exists inside the rootfs jail and Write the nameserver directly into the jail's path
+    mkdir("./rootfs/etc", 0755); 
+    write_file("./rootfs/etc/resolv.conf", "nameserver 8.8.8.8\n");
+    /* -------------------------------- */
 
     write(sync_pipe[1], "O", 1);
     close(sync_pipe[1]); 
@@ -108,8 +160,19 @@ int main() {
     waitpid(container_pid, NULL, 0);
 
 
-    system("ip link del veth_host");
-    rmdir(cgroup_dir);
+    printf("[Host] Tearing down network infrastructures...\n");
+    
+    // Bring it down first to release kernel locks, then delete it
+    system("ip link set veth_host down 2>/dev/null");
+    system("ip link del veth_host 2>/dev/null");
+    
+    system("iptables -t nat -D POSTROUTING -s 10.0.0.0/24 -j MASQUERADE 2>/dev/null");
+
+    if (rmdir(cgroup_dir) != 0) {
+        perror("[Host] Warning: Failed to clean up cgroup directory");
+    }
+    
     free(stack);
+    printf("[Host] Cleaned up smoothly. Exiting.\n");
     return 0;
 }
