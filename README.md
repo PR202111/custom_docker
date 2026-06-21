@@ -1,4 +1,4 @@
-```markdown
+
 # custom_docker — minimal container engine learning repo
 
 This repository is a step-by-step implementation of a minimal container engine (a tiny Docker-like project) written in C. It walks through the low-level building blocks of Linux containers and culminates in a small compose-like orchestrator that can launch a simple demo "victory_stack".
@@ -76,4 +76,4 @@ Each of the above folders contains a `README.md` with more detailed explanations
 This repository is published under the MIT License. See the bundled `LICENSE` file for the full text.
 
 ---
-```
+
