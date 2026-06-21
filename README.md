@@ -30,6 +30,16 @@ This repository is a step-by-step implementation of a minimal container engine (
 
 Each of the above folders contains a `README.md` with more detailed explanations and step-by-step commands. Open any of these for deeper, stage-specific instructions.
 
+## Demo video
+
+A short demo of the engine and `victory_stack` is included in this repository.
+
+<video controls width="720" height="405">
+   <source src="./demo.mp4" type="video/mp4">
+   Your browser does not support the video tag. You can download the demo here: [demo.mp4](./demo.mp4)
+</video>
+
+
 ## Quick links
 
 - [Root README for the engine and compose demo](./docker-implementation/README.md)
