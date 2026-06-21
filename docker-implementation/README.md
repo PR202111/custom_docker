@@ -1,4 +1,60 @@
-# Implementation: docker-compose
+# MyDocker Orchestration Engine
+
+A custom, completely scratch-built container orchestration engine written in C. This project implements the core primitives of Linux containerization (namespaces, cgroups, OverlayFS) and combines them with a custom YAML parser and IPAM system to create a declarative, compose-style deployment tool.
+
+## Technical Architecture
+
+This engine bypasses high-level wrappers and interacts directly with the Linux kernel and filesystem to achieve true process, storage, and network isolation.
+
+### 1. Process & Resource Isolation
+* **Namespaces:** Utilizes the `clone()` syscall with `CLONE_NEWNS`, `CLONE_NEWPID`, `CLONE_NEWUTS`, and `CLONE_NEWNET` to create strictly isolated environments.
+* **Cgroups v2:** Dynamically generates control groups (`/sys/fs/cgroup/my_container_<name>`) to strictly enforce `memory.max` and `pids.max` limits on running workloads.
+* **Chroot Jails:** Secures the process by pivoting the root filesystem and isolating `/proc` so internal processes cannot map host resources.
+
+### 2. Storage & Filesystem (OverlayFS & Bind Mounts)
+* **Union Filesystems:** Implements a multi-layered storage architecture using `mount -t overlay`. It pulls an immutable Alpine/Ubuntu base layer (`lowerdir`) and stacks a read-write container layer (`upperdir`) on top.
+* **Persistent Volumes:** Supports `mount --bind` to punch controlled holes through the isolated filesystem, mapping host directories directly to container inodes for live-reloading and database persistence.
+* **Delta Snapshots:** Includes a state-saving mechanism to archive only the `upper` directory deltas for lightweight backups.
+
+### 3. Networking & Routing
+* **Custom IPAM:** Features a lightweight IP Address Management system to dynamically allocate and lock `10.0.0.X` subnet addresses for newly spawned containers.
+* **Virtual Bridging:** Wires a custom `br0` host bridge and uses `veth` pairs to connect isolated network namespaces to the host.
+* **NAT Port Forwarding:** Programmatically injects `iptables` rules for **DNAT** (Destination NAT) and **Masquerading**, allowing host-bound traffic (e.g., `localhost:8080`) to seamlessly route into isolated container processes.
+
+### 4. Declarative Orchestration
+* **YAML Parsing:** Integrates `libyaml` to parse `docker-compose.yml` equivalents.
+* **Concurrency:** Forks multiple independent container pipelines simultaneously and tracks their lifecycles using `waitpid()`.
+
+## Usage & CLI Commands
+
+> **Note:** This engine requires `sudo` as it manipulates host kernel tables, mounts, and network interfaces.
+
+* `sudo ./engine init`
+  Initializes the host environment and pulls the base OS rootfs architecture.
+* `sudo ./engine compose-up`
+  Parses the local `docker-compose.yml`, provisions networking, and spins up the entire stack concurrently.
+* `sudo ./engine compose-down [-v]`
+  Gracefully terminates the stack. Passing the `-v` flag permanently wipes the isolated storage layers.
+* `sudo ./engine ps`
+  Lists all active containers by probing host PID records.
+* `sudo ./engine spin_up <name> [--memory] [--pids] [--dns]`
+  Imperatively launches a single container with specific resource limits.
+* `sudo ./engine save <name> <dir>`
+  Archives the container's delta layer to a host directory.
+* `sudo ./engine uninstall`
+  A nuclear cleanup command that unmounts all active filesystems, drops the virtual bridge, and purges the host directory configuration.
+
+## Running the Demo ("Victory Stack")
+
+The repository includes a sample deployment to test the engine's capability, featuring a FastAPI backend, a web UI, and a persistent SQLite volume mount.
+
+1. Compile the engine: `gcc main.c -lyaml -o engine`
+2. Initialize the storage roots: `sudo ./engine init`
+3. Launch the deployment: `sudo ./engine compose-up`
+4. Access the routed container via `http://localhost:8080`.
+
+## Platform Constraints
+This software interacts intimately with the Linux kernel. It requires a Linux host (e.g., Ubuntu 22.04/24.04) and relies on features specific to `systemd` and modern kernel configurations (Cgroups v2, OverlayFS).
 
 ## The Major Architecture Upgrades
 
@@ -24,31 +80,3 @@ In the Final Stage, you introduced **Network Address Translation (NAT)** via `ip
 
 ---
 
-## How to Run the "Victory Stack" Demo
-
-Your directory structure is perfectly set up for an impressive demo. Here is the exact sequence to execute it:
-
-1. **Initialize the Engine (Once per system):**
-```bash
-sudo ./engine init
-
-```
-
-
-This downloads the base Ubuntu layer to your host.
-2. **Deploy the Stack:**
-Navigate to your `victory_stack` directory where the `docker-compose.yml` lives.
-```bash
-sudo ./engine compose-up
-
-```
-
-
-Your engine will parse the YAML, fork two child processes, bind-mount the `backend` and `frontend` directories, and wire up the `iptables` routing for ports 8000 and 8080.
-3. **Demonstrate Live Reloading:**
-Open your browser to `http://localhost:8000`. Then, open `backend/main.py` on your host machine, change a string of text, and hit save. Because of the bind mount, the container sees the file change instantly.
-4. **Demonstrate Persistence:**
-Use the UI to write a message to the database. It will save to the `database/` folder on your host.
-Run `sudo ./engine compose-down`, then `sudo ./engine compose-up` again. The data survives the container destruction.
-
----
